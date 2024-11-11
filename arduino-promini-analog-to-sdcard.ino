@@ -27,6 +27,8 @@
 #define PIN_IN_LEADOFF_MINUS 3
 #define PIN_IN_LEADOFF_PLUS 2
 #define SD_CARD_CS_PIN 4
+#define PIN_OUT_LEDWHITE 9
+#define PIN_OUT_LEDRED 8
 
 #define FLUSH_CYCLE_MS 10000  /* after 10s, flush the write buffer to the SD card */
 #define ANALOG_SAMPLE_TIME_MS 1 /* configuration hint: use at least 1ms */
@@ -40,6 +42,11 @@ uint32_t timeLastFlush_ms;
 uint32_t timeLastSample_ms;
 uint16_t filenumber;
 uint16_t freeFilenumber;
+uint32_t sampleNumber;
+
+#define SAMPLE_HISTORY_LENGTH 30
+uint16_t sampleHistory[SAMPLE_HISTORY_LENGTH];
+uint8_t sampleHistoryWriteIndex;
 
 void printContentOfExistingFile(void) {
   #define FILE_NAME "analog.txt"
@@ -109,6 +116,18 @@ void findUnusedFileName(void) {
   }
 }
 
+void evaluateSampleHistory(void) {
+  int8_t indexOldest, indexLatest, indexMiddle;
+  indexOldest = sampleHistoryWriteIndex; /* the write index points to the data which will be written next, so this is the oldest. */
+  indexLatest = indexOldest-1; if (indexLatest<0) indexLatest+=SAMPLE_HISTORY_LENGTH;
+  indexMiddle = indexOldest + SAMPLE_HISTORY_LENGTH/2; if (indexMiddle>=SAMPLE_HISTORY_LENGTH) indexMiddle-=SAMPLE_HISTORY_LENGTH;
+  if ((sampleHistory[indexMiddle]>sampleHistory[indexOldest]+80) &&
+      (sampleHistory[indexMiddle]>sampleHistory[indexLatest]+80)) {
+        digitalWrite(PIN_OUT_LEDWHITE, 1); /* if we see a peak in the middle, light the white LED */
+      } else {
+        digitalWrite(PIN_OUT_LEDWHITE, 0);
+      }
+}
 
 void storeSampleIntoFile(void) {
   char strTmp[30];
@@ -116,9 +135,18 @@ void storeSampleIntoFile(void) {
   float fTime_s;
 
     u = analogRead(A0);
+    sampleHistory[sampleHistoryWriteIndex] = u;
+    sampleHistoryWriteIndex++;
+    if (sampleHistoryWriteIndex>=SAMPLE_HISTORY_LENGTH) sampleHistoryWriteIndex=0;
+    evaluateSampleHistory();
     status = 0;
     if (digitalRead(PIN_IN_LEADOFF_MINUS)) { status |= 1; } /* lead minus is off */
     if (digitalRead(PIN_IN_LEADOFF_PLUS)) { status |= 2; } /* lead plus is off */
+    if (status!=0) {
+      digitalWrite(PIN_OUT_LEDRED, 1); /* any lead off -> red LED on */
+    } else {
+      digitalWrite(PIN_OUT_LEDRED, 0); /* everything fine -> red LED off */
+    }
     if (u<50) status |= 4; /* voltage is very low */
     if (u>950) status |= 8; /* voltage is very high */
     fTime_s = (float)time_ms/1000;
@@ -126,12 +154,32 @@ void storeSampleIntoFile(void) {
     sprintf(strTmp, "%s,%d,%d", floatStr, u, status);
     //Serial.println(String(time_ms)+"\t"+String(u));
     if (myFile) { myFile.println(strTmp); }
+    sampleNumber++;
+    if (sampleNumber>900000) {
+      /* quater of an hour of samples. Choose a new file name. */
+      if (myFile) {
+        myFile.close();
+        findUnusedFileName();
+        sampleNumber=0;
+      }
+    }
 }
 
 
 void setup() {
   pinMode(PIN_IN_LEADOFF_MINUS, INPUT);
   pinMode(PIN_IN_LEADOFF_PLUS, INPUT);
+  pinMode(PIN_OUT_LEDWHITE, OUTPUT);
+  pinMode(PIN_OUT_LEDRED, OUTPUT);
+  digitalWrite(PIN_OUT_LEDWHITE, 1);
+  digitalWrite(PIN_OUT_LEDRED, 0);
+  delay(300);
+  digitalWrite(PIN_OUT_LEDWHITE, 0);
+  digitalWrite(PIN_OUT_LEDRED, 1);
+  delay(300);
+  digitalWrite(PIN_OUT_LEDWHITE, 0);
+  digitalWrite(PIN_OUT_LEDRED, 0);
+
   Serial.begin(115200);
   Serial.print("Initializing SD card...");
   if (!SD.begin(SD_CARD_CS_PIN)) {
