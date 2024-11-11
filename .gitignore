@@ -1,0 +1,10 @@
+/__pycache__/
+/doc/*.jar
+*.bat
+*.txt
+*.ini
+/log
+/local
+*.bak
+*.pyc
+
