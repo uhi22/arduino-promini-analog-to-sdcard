@@ -1,5 +1,3 @@
-import matplotlib.pyplot as plt
-import numpy as np
 
 def is_number(s):
     try:
@@ -8,9 +6,6 @@ def is_number(s):
     except ValueError:
         return False
 
-
-# x = np.linspace(0, 2 * np.pi, 200)
-# y = np.sin(x)
 
 x=[]
 y=[]
@@ -22,78 +17,69 @@ y3=[]
 nLines=0
 nSamples=0
 tFloat=0
-avgValue=[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
-avgCount=[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
-
-#avg[2]=avg[2]+1
-#for i in range(0, len(avg)):
-#    print(avg[i])
+tLastSample = -1
+tDiff = -1
+tDiffMax = 0
+tDiffMin = 1000000
+tDiffSum = 0
+nSamplesForSum = 0
+nSampleTimeAbove2ms = 0
+nSampleTimeAbove3ms = 0
+nSampleTimeAbove5ms = 0
+nSampleTimeAbove10ms = 0
 
 # Open the file in read mode
-with open('DAT00017.TXT', 'r') as file:
+with open('A00007.TXT', 'r') as file:
     # Read each line in the file
     for line in file:
         nLines=nLines+1
         # Print each line
         # print(line.strip())
         lineElements = line.split(",")
-        if len(lineElements)==3:
+        if len(lineElements)>=2:
             t = lineElements[0].strip()
             adc = lineElements[1].strip()
             if (is_number(t) and is_number(adc)):
-                tFloat = float(t)
+                tFloat = float(t) * 0.001 # from ms into s
                 adcFloat = float(adc)
-                if (tFloat>115.3):
-                    #adcFloat = 100-1*np.sin((tFloat+0.010)/0.02*2*3.1416)
-                    #if (tFloat<115.2):
-                    #    adcFloat=adcFloat+0
-                    avgIndex = int(tFloat*1000) % 20
-                    #print("index " + str(avgIndex) + ", old: " + str(avg[avgIndex]))
-                    avgValue[avgIndex]+= adcFloat
-                    avgCount[avgIndex]+=1
-                    
+                if (tFloat>0.2):
                     x.append(tFloat)
                     y.append(adcFloat)
+                    if (tLastSample>0):
+                        # we have a valid last sample time. Let's calcultate the sampling cycle time.
+                        tDiff = tFloat - tLastSample
+                        if (tDiff>tDiffMax):
+                            tDiffMax = tDiff
+                        if (tDiff<tDiffMin):
+                            tDiffMin = tDiff
+                        tDiffSum += tDiff
+                        nSamplesForSum += 1
+                        if (tDiff>0.002): # count, how many samples took longer than 2ms
+                            nSampleTimeAbove2ms += 1
+                        if (tDiff>0.003): # count, how many samples took longer than 3ms
+                            nSampleTimeAbove3ms += 1
+                        if (tDiff>0.005): # count, how many samples took longer than 5ms
+                            nSampleTimeAbove5ms += 1
+                        if (tDiff>0.010): # count, how many samples took longer than 10ms
+                            nSampleTimeAbove10ms += 1
+                            print("very long sampling time at " + str(tFloat))
+                    tLastSample = tFloat
                     #sinValue = np.sin(tFloat/0.02*2*np.pi)
                     #cosValue = np.cos(tFloat/0.02*2*np.pi)
                     #y2.append(sinValue)
                     nSamples+=1
-        if tFloat>115.5:
-            break
+        #if tFloat>115.5:
+        #    break
 
-avgOverAverages=0
-for i in range(0, len(avgValue)):
-    if (avgCount[i]>0):
-        avgValue[i] = avgValue[i] / avgCount[i]
-    avgOverAverages+=avgValue[i]
-    # print(avgValue[i])
-avgOverAverages/=len(avgValue) # The average over the whole
+print("Statistics")
+print("min sample time [s] " + str(tDiffMin))
+print("max sample time [s] " + str(tDiffMax))
+print("avg sample time [s] " + str(tDiffSum/nSamplesForSum))
+print("recorded time   [s] " + str(tDiffSum))
+print("number of samples longer than 2ms " + str(nSampleTimeAbove2ms))
+print("number of samples longer than 3ms " + str(nSampleTimeAbove3ms))
+print("number of samples longer than 5ms " + str(nSampleTimeAbove5ms))
+print("number of samples longer than 10ms " + str(nSampleTimeAbove10ms))
 
-compensationValues = []
-for i in range(0, len(avgValue)):
-    compensationValues.append(avgValue[i] - avgOverAverages)
-
-for i in range(0, len(y)):
-    avgIndex = int(x[i]*1000) % 20
-    compensation = compensationValues[avgIndex]
-    y2.append(compensation)
-    y3value = y[i] - compensation
-    y3.append(y3value)
-
-ax1 = plt.subplot(411)
-plt.plot(x, y)
-plt.tick_params('x', labelsize=6)
-
-# share x only
-ax2 = plt.subplot(412, sharex=ax1)
-plt.plot(x, y2)
-
-ax3 = plt.subplot(413, sharex=ax1)
-plt.plot(x, y3)
-
-ax4 = plt.subplot(414)
-plt.plot(compensationValues, '-ob') # - means solid line, o means circle, b means blue
-
-plt.show()
 
 
