@@ -1,7 +1,7 @@
 /__pycache__/
 /doc/*.jar
 *.bat
-*.txt
+# *.txt
 *.ini
 /log
 /local
