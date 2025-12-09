@@ -27,14 +27,16 @@
 #define PIN_IN_LEADOFF_MINUS 3
 #define PIN_IN_LEADOFF_PLUS 2
 #define SD_CARD_CS_PIN 4
+#define PIN_IN_BUTTON 5
+#define PIN_BUZZER 6
 #define PIN_OUT_LEDWHITE 9
 #define PIN_OUT_LEDRED 8
 
 #define FLUSH_CYCLE_MS 10000  /* after 10s, flush the write buffer to the SD card */
 #define STORE_CYCLE_TIME_MS 5 /* each 5ms store the samples in the RAM buffer to the SD card. */
 
-/* we want 1kHz (1ms) sampling, and a buffer which covers
-   50ms "collection time" plus 100ms worst case write time of the SD card. So 150ms/1ms = 150 Samples. */
+/* we want 500Hz (2ms) sampling, and a buffer which covers
+   at least 100ms worst case write time of the SD card. So 100ms/2ms = 50 Samples. */
 #define ADC_FIFO_LENGTH 50
 uint16_t adcFifoValue[ADC_FIFO_LENGTH];
 uint32_t adcFifoTimestamp_ms[ADC_FIFO_LENGTH];
@@ -42,11 +44,13 @@ uint16_t adcFifoWriteIndex, adcFifoReadIndex;
 volatile uint16_t adcFifoOverrunCounter;
 
 volatile uint32_t isrNumberOfAdcInterrupts;
-volatile uint32_t isrNumberOf1msInterrupts;
+volatile uint32_t isrNumberOf2msInterrupts;
 volatile uint16_t latestAdcSample;
 
+uint8_t nButtonDebounce, nButtonActuations;
+
 File myFile;
-uint16_t hwstatus;
+volatile uint16_t hwstatus;
 uint32_t time_ms;
 uint32_t timeLastFlush_ms;
 uint32_t timeLastStore_ms;
@@ -55,7 +59,7 @@ uint16_t freeFilenumber;
 uint32_t sampleNumber;
 
 #define PEAK_SIZE_FOR_LED_FLASH 70
-#define SHORT_TERM_HISTORY_LENGTH 50 /* e.g. 50 means 50 samples means 50ms */
+#define SHORT_TERM_HISTORY_LENGTH 25 /* e.g. 25 means 25 samples means 50ms */
 uint16_t shortTermHistory[SHORT_TERM_HISTORY_LENGTH];
 uint8_t shortTermHistoryWriteIndex;
 
@@ -101,7 +105,7 @@ void openFileForWriting(void) {
   // if the file opened okay, write to it:
   if (myFile) {
     Serial.print(String("Writing to ") + String(strFileName));
-    myFile.println("time_ms,adc,status,overruns");
+    myFile.println(F("time_ms,adc,status,overruns,buttons"));
   } else {
     // if the file didn't open, print an error:
     Serial.println("error opening file");
@@ -118,12 +122,12 @@ void findUnusedFileName(void) {
     Serial.print(strTmp);
     myFile = SD.open(strTmp); /* try to open the file for reading */
     if (myFile) {
-      Serial.println(" exists");
+      Serial.println(F(" exists"));
       myFile.close();
       filenumber++; /* try the next file name */
     } else {
       /* if the file didn't open, it does not exist. This means, we found an unused file name. */
-      Serial.println(" does not exist");
+      Serial.println(F(" does not exist"));
       if (freeFilenumber==0xffff) {
         freeFilenumber = filenumber;
       }
@@ -175,7 +179,7 @@ void storeCollectedSamplesIntoFile(void) {
 
     if (adcFifoReadIndex==0) {
       /* log the long entry including statistics */
-      sprintf(strTmp, "%ld,%d,%d,%d", t_ms, y, hwstatus, adcFifoOverrunCounter);
+      sprintf(strTmp, "%ld,%d,%d,%d,%d", t_ms, y, hwstatus, adcFifoOverrunCounter,nButtonActuations);
     } else {
       /* normally only log the timestamp and the analog input */
       sprintf(strTmp, "%ld,%d", t_ms, y);
@@ -183,7 +187,7 @@ void storeCollectedSamplesIntoFile(void) {
     //Serial.println(String(time_ms)+"\t"+String(u));
     if (myFile) { myFile.println(strTmp); }
     sampleNumber++;
-    if (sampleNumber>900000) {
+    if (sampleNumber>450000) {
       /* quater of an hour of samples. Choose a new file name. */
       if (myFile) {
         myFile.close();
@@ -196,25 +200,42 @@ void storeCollectedSamplesIntoFile(void) {
 
 
 void printStatistics(void) {
-  Serial.print(F("1msInt "));
-  Serial.print(isrNumberOf1msInterrupts);
-  Serial.print(F(" nAdcInt "));
+  Serial.print(F("2msInt "));
+  Serial.print(isrNumberOf2msInterrupts);
+  Serial.print(F(", nAdcInt "));
   Serial.print(isrNumberOfAdcInterrupts);
-  Serial.print(F(" Overrun "));
-  Serial.println(adcFifoOverrunCounter);
+  Serial.print(F(", Overrun "));
+  Serial.print(adcFifoOverrunCounter);
+  Serial.print(F(", hwstat "));
+  Serial.print(hwstatus);
+  Serial.print(F(", btns"));
+  Serial.println(nButtonActuations);
 }
 
-/* Timer1 Compare A interrupt - triggers every millisecond */
+void evaluateButton(void) {
+  if (digitalRead(PIN_IN_BUTTON)==0) {
+    /* if button is pressed (low active) */
+    nButtonDebounce++;
+    if (nButtonDebounce==3) {
+      nButtonActuations++;
+    }
+  } else {
+    /* button not pressed --> reset the debounce counter */
+    nButtonDebounce = 0;
+  }
+}
+
+/* Timer1 Compare A interrupt - triggers every 2 milliseconds */
 ISR(TIMER1_COMPA_vect) {
   ADCSRA |= (1 << ADSC); /* trigger the AD conversion */
-  isrNumberOf1msInterrupts++;
+  isrNumberOf2msInterrupts++;
 }
 
 /* ADC Conversion Complete interrupt */
 ISR(ADC_vect) {  
   latestAdcSample = ADC; /* Read 10-bit result (0-1023) */
   adcFifoValue[adcFifoWriteIndex]=latestAdcSample;
-  adcFifoTimestamp_ms[adcFifoWriteIndex]=isrNumberOfAdcInterrupts;
+  adcFifoTimestamp_ms[adcFifoWriteIndex]=2*isrNumberOfAdcInterrupts; /* 2ms sample periode */
   adcFifoWriteIndex++;
   if (adcFifoWriteIndex >= ADC_FIFO_LENGTH) {
     adcFifoWriteIndex=0;
@@ -223,6 +244,7 @@ ISR(ADC_vect) {
     /* this indicates a buffer overflow. Strategy: we discard the complete buffer, and count the error. */
     adcFifoOverrunCounter++;
   }
+  calculateHardwareStatusAndShowOnLEDs();
   evaluateShortTermHistoryAndControlActivityLED(); /* blink LED depending on the waveform */
   isrNumberOfAdcInterrupts++;
 }
@@ -232,7 +254,7 @@ void initializeTimerForAdcAndAdc(void) {
    // Disable interrupts during setup
   cli();
   
-  // === Configure Timer1 for 500μs (2kHz) ===
+  // === Configure Timer1 for 2ms (0.5kHz) ===
   TCCR1A = 0;  // Normal mode
   TCCR1B = 0;
   TCNT1 = 0;   // Reset counter
@@ -243,8 +265,8 @@ void initializeTimerForAdcAndAdc(void) {
   // Prescaler = 8 (for 16MHz: 16MHz/8 = 2MHz timer clock)
   TCCR1B |= (1 << CS11);
   
-  // Compare value: 2MHz / 1kHz = 2000 cycles for 1000μs
-  OCR1A = 1999;  // (count from 0 to 1999 = 2000 cycles)
+  // Compare value: 2MHz / 0.5kHz = 4000 cycles for 2ms
+  OCR1A = 3999;  // (count from 0 to 3999 = 4000 cycles)
   
   // Enable Timer1 Compare A interrupt
   TIMSK1 |= (1 << OCIE1A);
@@ -267,8 +289,10 @@ void initializeTimerForAdcAndAdc(void) {
 void setup() {
   pinMode(PIN_IN_LEADOFF_MINUS, INPUT);
   pinMode(PIN_IN_LEADOFF_PLUS, INPUT);
+  pinMode(PIN_IN_BUTTON, INPUT_PULLUP);
   pinMode(PIN_OUT_LEDWHITE, OUTPUT);
   pinMode(PIN_OUT_LEDRED, OUTPUT);
+  pinMode(PIN_BUZZER, OUTPUT);
   digitalWrite(PIN_OUT_LEDWHITE, 1);
   digitalWrite(PIN_OUT_LEDRED, 0);
   delay(300);
@@ -277,6 +301,7 @@ void setup() {
   delay(300);
   digitalWrite(PIN_OUT_LEDWHITE, 0);
   digitalWrite(PIN_OUT_LEDRED, 0);
+  digitalWrite(PIN_BUZZER, 0);
 
   Serial.begin(115200);
   Serial.print(F("Init SD card..."));
@@ -290,6 +315,13 @@ void setup() {
   if (freeFilenumber!=0xFFFF) {
     openFileForWriting();
   }
+  digitalWrite(PIN_BUZZER, 1);
+  delay(200);
+  digitalWrite(PIN_BUZZER, 0);
+  delay(200);
+  digitalWrite(PIN_BUZZER, 1);
+  delay(200);
+  digitalWrite(PIN_BUZZER, 0);
   Serial.print(F("Init ADC and Timer"));
   initializeTimerForAdcAndAdc();
 }
@@ -299,6 +331,7 @@ void loop() {
   time_ms = millis();
   if (time_ms-timeLastStore_ms>=STORE_CYCLE_TIME_MS) {
     storeCollectedSamplesIntoFile();
+    evaluateButton();
     timeLastStore_ms = time_ms;
   }
   if (time_ms-timeLastFlush_ms>FLUSH_CYCLE_MS) {
