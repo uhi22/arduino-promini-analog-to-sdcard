@@ -34,6 +34,7 @@
 
 #define FLUSH_CYCLE_MS 10000  /* after 10s, flush the write buffer to the SD card */
 #define STORE_CYCLE_TIME_MS 5 /* each 5ms store the samples in the RAM buffer to the SD card. */
+#define EXTENDED_RECORD_CYCLE_TIME_MS 1000 /* once per second we want to store a "long" data record with statistics */
 
 /* we want 500Hz (2ms) sampling, and a buffer which covers
    at least 100ms worst case write time of the SD card. So 100ms/2ms = 50 Samples. */
@@ -44,8 +45,11 @@ uint16_t adcFifoWriteIndex, adcFifoReadIndex;
 volatile uint16_t adcFifoOverrunCounter;
 
 volatile uint32_t isrNumberOfAdcInterrupts;
-volatile uint32_t isrNumberOf2msInterrupts;
+volatile uint32_t isrNumberOf500usInterrupts;
+volatile uint8_t isr500usDivider;
 volatile uint16_t latestAdcSample;
+volatile uint8_t blToneOn;
+volatile uint8_t blPeakDetected;
 
 uint8_t nButtonDebounce, nButtonActuations;
 
@@ -54,6 +58,8 @@ volatile uint16_t hwstatus;
 uint32_t time_ms;
 uint32_t timeLastFlush_ms;
 uint32_t timeLastStore_ms;
+uint32_t timeExtendedRecord_ms;
+uint8_t blTriggerExtendedRecord;
 uint16_t filenumber;
 uint16_t freeFilenumber;
 uint32_t sampleNumber;
@@ -160,9 +166,21 @@ void evaluateShortTermHistoryAndControlActivityLED(void) {
   if ((shortTermHistory[indexMiddle]>shortTermHistory[indexOldest]+PEAK_SIZE_FOR_LED_FLASH) &&
       (shortTermHistory[indexMiddle]>shortTermHistory[indexLatest]+PEAK_SIZE_FOR_LED_FLASH)) {
         digitalWrite(PIN_OUT_LEDWHITE, 1); /* if we see a peak in the middle, light the white LED */
+        blPeakDetected = 1;
       } else {
         digitalWrite(PIN_OUT_LEDWHITE, 0);
+        blPeakDetected = 0;
       }
+}
+
+void controlTheTone(void) {
+  if (hwstatus != 0) {
+    blToneOn = 1; /* create error tone */
+  } else if (blPeakDetected) {
+    blToneOn = 1; /* the normal activity tone */
+  } else {
+    blToneOn = 0; /* silence */
+  }
 }
 
 void storeCollectedSamplesIntoFile(void) {
@@ -177,9 +195,10 @@ void storeCollectedSamplesIntoFile(void) {
     adcFifoReadIndex++;
     if (adcFifoReadIndex>=ADC_FIFO_LENGTH) adcFifoReadIndex = 0;
 
-    if (adcFifoReadIndex==0) {
+    if (blTriggerExtendedRecord) {
       /* log the long entry including statistics */
       sprintf(strTmp, "%ld,%d,%d,%d,%d", t_ms, y, hwstatus, adcFifoOverrunCounter,nButtonActuations);
+      blTriggerExtendedRecord = 0; /* consume the trigger */
     } else {
       /* normally only log the timestamp and the analog input */
       sprintf(strTmp, "%ld,%d", t_ms, y);
@@ -200,8 +219,8 @@ void storeCollectedSamplesIntoFile(void) {
 
 
 void printStatistics(void) {
-  Serial.print(F("2msInt "));
-  Serial.print(isrNumberOf2msInterrupts);
+  Serial.print(F("500usInt "));
+  Serial.print(isrNumberOf500usInterrupts);
   Serial.print(F(", nAdcInt "));
   Serial.print(isrNumberOfAdcInterrupts);
   Serial.print(F(", Overrun "));
@@ -225,10 +244,19 @@ void evaluateButton(void) {
   }
 }
 
-/* Timer1 Compare A interrupt - triggers every 2 milliseconds */
+/* Timer1 Compare A interrupt - triggers every 500µs */
 ISR(TIMER1_COMPA_vect) {
-  ADCSRA |= (1 << ADSC); /* trigger the AD conversion */
-  isrNumberOf2msInterrupts++;
+  isr500usDivider=(isr500usDivider+1) % 4; /* counting from 0 to 3. To create a 2ms cycle. */
+  if (isr500usDivider==0) {
+    /* in 2ms cycle, we want to sample the analog input */
+    ADCSRA |= (1 << ADSC); /* trigger the AD conversion */
+  }
+  if (isr500usDivider & 1) { /* mirror the bit 0 to the buzzer, to create a 1kHz tone. But only if the tone is requested. */
+    if (blToneOn) digitalWrite(PIN_BUZZER, 1);
+  } else {
+    digitalWrite(PIN_BUZZER, 0);
+  }
+  isrNumberOf500usInterrupts++;
 }
 
 /* ADC Conversion Complete interrupt */
@@ -246,6 +274,7 @@ ISR(ADC_vect) {
   }
   calculateHardwareStatusAndShowOnLEDs();
   evaluateShortTermHistoryAndControlActivityLED(); /* blink LED depending on the waveform */
+  controlTheTone();
   isrNumberOfAdcInterrupts++;
 }
 
@@ -254,7 +283,7 @@ void initializeTimerForAdcAndAdc(void) {
    // Disable interrupts during setup
   cli();
   
-  // === Configure Timer1 for 2ms (0.5kHz) ===
+  // === Configure Timer1 for 500µs (2kHz) ===
   TCCR1A = 0;  // Normal mode
   TCCR1B = 0;
   TCNT1 = 0;   // Reset counter
@@ -265,8 +294,8 @@ void initializeTimerForAdcAndAdc(void) {
   // Prescaler = 8 (for 16MHz: 16MHz/8 = 2MHz timer clock)
   TCCR1B |= (1 << CS11);
   
-  // Compare value: 2MHz / 0.5kHz = 4000 cycles for 2ms
-  OCR1A = 3999;  // (count from 0 to 3999 = 4000 cycles)
+  // Compare value: 2MHz / 2kHz = 1000 cycles for 500us
+  OCR1A = 999;  // (count from 0 to 999 = 1000 cycles)
   
   // Enable Timer1 Compare A interrupt
   TIMSK1 |= (1 << OCIE1A);
@@ -337,9 +366,14 @@ void loop() {
   if (time_ms-timeLastFlush_ms>FLUSH_CYCLE_MS) {
     myFile.flush();
     timeLastFlush_ms = time_ms;
-    printStatistics();
     //Serial.println("Flushed");
   }
+  if (time_ms-timeExtendedRecord_ms>EXTENDED_RECORD_CYCLE_TIME_MS) {
+    timeExtendedRecord_ms = time_ms;
+    blTriggerExtendedRecord = 1;
+    printStatistics();
+  }
+  
 }
 
 
