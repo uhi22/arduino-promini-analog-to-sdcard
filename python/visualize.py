@@ -7,6 +7,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 
+#from scipy.signal import find_peaks # for peak detection
+
 # ============================================================================
 # METHOD 1: Using Pandas and Matplotlib (Most Common)
 # ============================================================================
@@ -79,6 +81,47 @@ def method2_detailed_analysis(filename):
 # METHOD 3: Interactive Plot with Plotly
 # ============================================================================
 
+def calculateDerivedData(df):
+    # Find peaks in the 'adc' column and calculate the cycle time of the peaks
+
+    # Create a new columns
+    # Initialize with NaN
+    df['peakIndication'] = float('nan')
+    df['peaks'] = float('nan')
+    df['dt_ms'] = float('nan')
+    peakInhibitCounter = 0
+    peaks = []
+    iLastPeak = 0
+    print(len(df['adc']))
+    for i in range(len(df['adc'])-20):
+        if (i>20):
+            # Step 1: Take three samples, with 20ms+20ms distance (at 2ms sampling cycle time).
+            leftValue = df['adc'][i-10]
+            midValue = df['adc'][i]
+            rightValue = df['adc'][i+10]
+            # Step 2: calculate, how much it looks like low-high-low
+            peakIndication = (midValue - leftValue + midValue - rightValue)
+            if (midValue-leftValue)<220:
+                # it is not peak, if the leading edge is too small
+                peakIndication = 0
+            if (midValue-rightValue)<220:
+                # it is not peak, if the trailing edge is too small
+                peakIndication = 0
+            df.at[i, 'peakIndication']=peakIndication
+            if (peakIndication>300) and (peakInhibitCounter==0):
+                df.at[i, 'peaks'] = peakIndication
+                peakInhibitCounter = 50 # 50 samples is 25ms until we allow to see the next peak
+                if (iLastPeak>0): # if we had a peak before, let's calculate the time from the last to the current peak
+                    dt_ms = df['time_ms'][i] - df['time_ms'][iLastPeak]
+                    df.at[i, 'dt_ms'] = dt_ms
+                    if (dt_ms>=60000/250) and (dt_ms<=2000):
+                        df.at[i, 'bpm'] = 60000 / dt_ms
+                iLastPeak = i
+            if (peakInhibitCounter>0):
+                peakInhibitCounter-=1
+
+
+
 def method3_interactive_plotly(filename):
     """Interactive plot using plotly (requires: pip install plotly)"""
     try:
@@ -87,12 +130,14 @@ def method3_interactive_plotly(filename):
         
         df = pd.read_csv(filename)
         # we could calculate additional data based on the given data
-        df['voltage'] = df['adc'] * 5.0 / 1023.0
+        calculateDerivedData(df)
+        #df['voltage'] = df['adc'] * 5.0 / 1023.0
         
         # Create subplots
         fig = make_subplots(
-            rows=3, cols=1,
-            subplot_titles=('ADC Waveform', 'Voltage (V)', 'Number of button actuations and Status'),
+            rows=4, cols=1,
+            row_heights=[0.8, 0.15, 1.0, 0.15],
+            subplot_titles=('ADC Waveform', 'cycletime_ms', 'Heartrate', 'Number of button actuations and Status'),
             shared_xaxes = True, # This syncs the x-axis of all plots.
             vertical_spacing=0.1
         )
@@ -105,12 +150,22 @@ def method3_interactive_plotly(filename):
             row=1, col=1
         )
         
-        # Add voltage trace
+        # Add cycletime_ms
         fig.add_trace(
-            go.Scatter(x=df['time_ms'], y=df['voltage'], 
-                      mode='lines', name='Voltage',
-                      line=dict(color='red', width=1)),
+            go.Scatter(x=df['time_ms'], y=df['dt_ms'],
+                      name='dt_ms',
+                      mode='markers', 
+                      marker=dict( size=5, color='red', opacity=0.7)),
             row=2, col=1
+        )
+
+        # Add bpm
+        fig.add_trace(
+            go.Scatter(x=df['time_ms'], y=df['bpm'],
+                      name='Heartrate',
+                      mode='markers', 
+                      marker=dict( size=5, color='black', opacity=1.0)),
+            row=3, col=1
         )
 
         # Add buttons trace
@@ -118,8 +173,8 @@ def method3_interactive_plotly(filename):
             go.Scatter(x=df['time_ms'], y=df['buttons'], 
                       name='buttons',
                       mode='markers',
-                      marker=dict( size=30, color='orange', opacity=0.7)),
-            row=3, col=1
+                      marker=dict( size=8, color='orange', opacity=0.7)),
+            row=4, col=1
         )
 
         # Add status trace
@@ -127,19 +182,17 @@ def method3_interactive_plotly(filename):
             go.Scatter(x=df['time_ms'], y=df['status'], 
                       name='status',
                       mode='markers',
-                      marker=dict( size=10, color='green', opacity=0.7)),
-            row=3, col=1
+                      marker=dict( size=4, color='green', opacity=0.7)),
+            row=4, col=1
         )
 
         
         # Update layout
-        fig.update_xaxes(title_text="Time (ms)", row=2, col=1)
+        fig.update_xaxes(title_text="Time (ms)", row=4, col=1)
         fig.update_yaxes(title_text="ADC Value", row=1, col=1, fixedrange=True) # no y zoom
-        fig.update_yaxes(title_text="Voltage (V)", row=2, col=1)
-        fig.update_yaxes(title_text="number of button actuations", row=3, col=1, fixedrange=True) # no y zoom
-        # X-axis: zoomable, Y-axis: fixed
-        #fig.update_xaxes(fixedrange=False)
-        #fig.update_yaxes(fixedrange=True)
+        fig.update_yaxes(title_text="ms", row=2, col=1, fixedrange=True) # no y zoom
+        fig.update_yaxes(title_text="bpm", row=3, col=1, fixedrange=True) # no y zoom
+        fig.update_yaxes(title_text="", row=4, col=1, fixedrange=True) # no y zoom
         
         fig.update_layout(
             title_text="Interactive Data Visualization of " + filename,
@@ -186,7 +239,9 @@ def method5_save_plots(filename, output='waveform.png'):
 # ============================================================================
 
 if __name__ == "__main__":
-    filename = 'A00042_2025-12-11.TXT'
+    filename = 'DAT00008_2025-12-12_one_event.TXT'
+    #filename = 'DAT00008_part360to390.TXT'
+    #filename = 'DAT00013.TXT'
     
     print("Choose visualization method:")
     print("1. Basic plot")
