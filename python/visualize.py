@@ -186,7 +186,7 @@ def method5_save_plots(filename, output='waveform.png'):
 # ============================================================================
 
 if __name__ == "__main__":
-    filename = 'A00039_leads_off_test.TXT'
+    filename = 'A00042_2025-12-11.TXT'
     
     print("Choose visualization method:")
     print("1. Basic plot")

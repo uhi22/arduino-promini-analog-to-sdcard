@@ -35,21 +35,24 @@
 #define FLUSH_CYCLE_MS 10000  /* after 10s, flush the write buffer to the SD card */
 #define STORE_CYCLE_TIME_MS 5 /* each 5ms store the samples in the RAM buffer to the SD card. */
 #define EXTENDED_RECORD_CYCLE_TIME_MS 1000 /* once per second we want to store a "long" data record with statistics */
+#define NEW_FILE_CYCLE_TIME_MINUTES 10  /* limits the duration of one file. We use a new file name after this time. */
+#define NEW_FILE_CYCLE_TIME_MS (NEW_FILE_CYCLE_TIME_MINUTES*60ul*1000ul)
 
 /* we want 500Hz (2ms) sampling, and a buffer which covers
    at least 100ms worst case write time of the SD card. So 100ms/2ms = 50 Samples. */
 #define ADC_FIFO_LENGTH 50
 uint16_t adcFifoValue[ADC_FIFO_LENGTH];
 uint32_t adcFifoTimestamp_ms[ADC_FIFO_LENGTH];
-uint16_t adcFifoWriteIndex, adcFifoReadIndex;
+volatile uint16_t adcFifoWriteIndex, adcFifoReadIndex;
 volatile uint16_t adcFifoOverrunCounter;
 
 volatile uint32_t isrNumberOfAdcInterrupts;
 volatile uint32_t isrNumberOf500usInterrupts;
 volatile uint8_t isr500usDivider;
 volatile uint16_t latestAdcSample;
-volatile uint8_t blToneOn;
+volatile uint8_t blToneOn, blUseTone;
 volatile uint8_t blPeakDetected;
+volatile uint8_t blRecordingEnabled;
 
 uint8_t nButtonDebounce, nButtonActuations;
 
@@ -59,9 +62,10 @@ uint32_t time_ms;
 uint32_t timeLastFlush_ms;
 uint32_t timeLastStore_ms;
 uint32_t timeExtendedRecord_ms;
+uint32_t timeLastNewFile_ms;
 uint8_t blTriggerExtendedRecord;
+uint8_t blTriggerNewFile;
 uint16_t filenumber;
-uint16_t freeFilenumber;
 uint32_t sampleNumber;
 
 #define PEAK_SIZE_FOR_LED_FLASH 70
@@ -69,76 +73,59 @@ uint32_t sampleNumber;
 uint16_t shortTermHistory[SHORT_TERM_HISTORY_LENGTH];
 uint8_t shortTermHistoryWriteIndex;
 
-#ifdef NOT_USED
-void printContentOfExistingFile(void) {
-  #define FILE_NAME "analog.txt"
-  myFile = SD.open(FILE_NAME); /* open the file for reading */
-  if (myFile) {
-    Serial.println(String("content of ") + String(FILE_NAME));
-    while (myFile.available()) { /* read from the file until there's nothing else in it */
-      Serial.write(myFile.read());
-    }
-    myFile.close();
-  } else {
-    // if the file didn't open, print an error:
-    Serial.println(String("error opening ") +  String(FILE_NAME));
-  }
-}
-#endif
-
-#ifdef NOT_USED2
-void writeSomethingToFileWithOpenAndClose(void) {
-  myFile = SD.open(FILE_NAME, FILE_WRITE);
-  // if the file opened okay, write to it:
-  if (myFile) {
-    Serial.print(String("Writing to ") + String(FILE_NAME));
-    myFile.println("test 1 2 3");
-    myFile.close();
-    Serial.println("done.");
-  } else {
-    // if the file didn't open, print an error:
-    Serial.println("error opening file");
-  }
-}
-#endif
-
-void openFileForWriting(void) {
-  char strFileName[20];
-  // open the file. note that only one file can be open at a time,
-  // so you have to close this one before opening another.
-  sprintf(strFileName, "A%05d.txt", freeFilenumber);
-  myFile = SD.open(strFileName, FILE_WRITE);
-  // if the file opened okay, write to it:
-  if (myFile) {
-    Serial.print(String("Writing to ") + String(strFileName));
-    myFile.println(F("time_ms,adc,status,overruns,buttons"));
-  } else {
-    // if the file didn't open, print an error:
-    Serial.println("error opening file");
+void showUnrecoverableError(void) {
+  /* This is reached in cases when something is generally broken. User needs to do a power-on-reset. */
+  while (1) {
+    digitalWrite(PIN_OUT_LEDRED, 1);
+    digitalWrite(PIN_OUT_LEDWHITE, 0);
+    blToneOn = 0;
+    delay(100);
+    digitalWrite(PIN_OUT_LEDRED, 0);
+    digitalWrite(PIN_OUT_LEDWHITE, 1);
+    blToneOn = 1;
+    delay(100);
   }
 }
 
-void findUnusedFileName(void) {
+void startRecording(void) {
+  adcFifoWriteIndex = 0; /* start with an empty FIFO */
+  adcFifoReadIndex = 0;
+  blRecordingEnabled = 1;
+}
+
+void stopRecording(void) {
+  blRecordingEnabled = 0;
+}
+
+void findUnusedFileNameAndOpenItForWriting(void) {
   /* tries different file names until an unused file name is found. */
-  char strTmp[20];
+  char strFileName[20];
   filenumber = 0;
-  freeFilenumber=0xffff;
-  while (freeFilenumber==0xffff) {
-    sprintf(strTmp, "A%05d.txt", filenumber); /* create a file name "dat000001.txt", with running number. */
-    Serial.print(strTmp);
-    myFile = SD.open(strTmp); /* try to open the file for reading */
+  while (1) { /* loop until we find a free file name */
+    sprintf(strFileName, "DAT%05d.txt", filenumber); /* create a file name "DAT00001.txt", with running number. */
+    myFile = SD.open(strFileName); /* try to open the file for reading */
     if (myFile) {
-      Serial.println(F(" exists"));
+      //Serial.print(strFileName);
+      //Serial.println(F(" exists"));
       myFile.close();
       filenumber++; /* try the next file name */
     } else {
       /* if the file didn't open, it does not exist. This means, we found an unused file name. */
-      Serial.println(F(" does not exist"));
-      if (freeFilenumber==0xffff) {
-        freeFilenumber = filenumber;
+      //Serial.print(strFileName);
+      //Serial.println(F(" does not exist"));
+      myFile = SD.open(strFileName, FILE_WRITE); /* try to create the file */
+      /* if the file opened okay, write to it: */
+      if (myFile) {
+        Serial.print(String(F("New file ")) + String(strFileName));
+        myFile.println(F("time_ms,adc,status,overruns,buttons"));
+      } else {
+        /* if the file didn't open, print an error */
+        Serial.println(F("error opening file for write"));
+        showUnrecoverableError();
       }
+      break;
     }
-  }
+  } 
 }
 
 
@@ -206,12 +193,19 @@ void storeCollectedSamplesIntoFile(void) {
     //Serial.println(String(time_ms)+"\t"+String(u));
     if (myFile) { myFile.println(strTmp); }
     sampleNumber++;
-    if (sampleNumber>450000) {
+
+
+    if (blTriggerNewFile) {
+      blTriggerNewFile = 0;
       /* quater of an hour of samples. Choose a new file name. */
       if (myFile) {
+        stopRecording(); /* disable sampling while we are creating a new file */
         myFile.close();
-        findUnusedFileName();
-        sampleNumber=0;
+        findUnusedFileNameAndOpenItForWriting();
+        startRecording(); /* new file is ready, continue sampling */
+      } else {
+        /* no file is open. This is a severe error. */
+        showUnrecoverableError();
       }
     }
   }
@@ -248,11 +242,13 @@ void evaluateButton(void) {
 ISR(TIMER1_COMPA_vect) {
   isr500usDivider=(isr500usDivider+1) % 4; /* counting from 0 to 3. To create a 2ms cycle. */
   if (isr500usDivider==0) {
-    /* in 2ms cycle, we want to sample the analog input */
-    ADCSRA |= (1 << ADSC); /* trigger the AD conversion */
+    if (blRecordingEnabled) {
+      /* in 2ms cycle, we want to sample the analog input */
+      ADCSRA |= (1 << ADSC); /* trigger the AD conversion */
+    }
   }
   if (isr500usDivider & 1) { /* mirror the bit 0 to the buzzer, to create a 1kHz tone. But only if the tone is requested. */
-    if (blToneOn) digitalWrite(PIN_BUZZER, 1);
+    if (blUseTone && blToneOn) digitalWrite(PIN_BUZZER, 1);
   } else {
     digitalWrite(PIN_BUZZER, 0);
   }
@@ -263,7 +259,7 @@ ISR(TIMER1_COMPA_vect) {
 ISR(ADC_vect) {  
   latestAdcSample = ADC; /* Read 10-bit result (0-1023) */
   adcFifoValue[adcFifoWriteIndex]=latestAdcSample;
-  adcFifoTimestamp_ms[adcFifoWriteIndex]=2*isrNumberOfAdcInterrupts; /* 2ms sample periode */
+  adcFifoTimestamp_ms[adcFifoWriteIndex]=isrNumberOf500usInterrupts/2; 
   adcFifoWriteIndex++;
   if (adcFifoWriteIndex >= ADC_FIFO_LENGTH) {
     adcFifoWriteIndex=0;
@@ -331,33 +327,24 @@ void setup() {
   digitalWrite(PIN_OUT_LEDWHITE, 0);
   digitalWrite(PIN_OUT_LEDRED, 0);
   digitalWrite(PIN_BUZZER, 0);
-
+  blUseTone = 1;
   Serial.begin(115200);
   Serial.print(F("Init SD card..."));
   if (!SD.begin(SD_CARD_CS_PIN)) {
     Serial.println(F("init failed!"));
-    while (1);
+    showUnrecoverableError();
   }
   Serial.println(F("done."));
   //printContentOfExistingFile();
-  findUnusedFileName();
-  if (freeFilenumber!=0xFFFF) {
-    openFileForWriting();
-  }
-  digitalWrite(PIN_BUZZER, 1);
-  delay(200);
-  digitalWrite(PIN_BUZZER, 0);
-  delay(200);
-  digitalWrite(PIN_BUZZER, 1);
-  delay(200);
-  digitalWrite(PIN_BUZZER, 0);
+  findUnusedFileNameAndOpenItForWriting();
   Serial.print(F("Init ADC and Timer"));
   initializeTimerForAdcAndAdc();
+  startRecording();
 }
 
 
 void loop() {
-  time_ms = millis();
+  time_ms = millis(); /* the millis() rolls-over after 49 days. This should be sufficient, no extra handling. */
   if (time_ms-timeLastStore_ms>=STORE_CYCLE_TIME_MS) {
     storeCollectedSamplesIntoFile();
     evaluateButton();
@@ -373,7 +360,10 @@ void loop() {
     blTriggerExtendedRecord = 1;
     printStatistics();
   }
-  
+  if (time_ms-timeLastNewFile_ms>NEW_FILE_CYCLE_TIME_MS) {
+    timeLastNewFile_ms = time_ms;
+    blTriggerNewFile = 1;
+  }
 }
 
 
