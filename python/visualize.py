@@ -239,7 +239,9 @@ def method5_save_plots(filename, output='waveform.png'):
 # ============================================================================
 
 if __name__ == "__main__":
-    filename = 'DAT00008_2025-12-12_one_event.TXT'
+    #filename = '../recordings/DAT00018_2025-12-15_normal_idle.TXT'
+    filename = '../recordings/DAT00071_2025-12-15_jogging_fastmode_slowmode.TXT'
+    #filename = '../recordings/DAT00044.TXT'
     #filename = 'DAT00008_part360to390.TXT'
     #filename = 'DAT00013.TXT'
     
@@ -249,7 +251,8 @@ if __name__ == "__main__":
     print("3. Interactive plot (Plotly)")
     print("5. Save plot to file")
     
-    choice = input("\nEnter choice (1-6): ").strip()
+    choice = "3"
+    #choice = input("\nEnter choice (1-6): ").strip()
     
     if choice == '1':
         method1_basic_plot(filename)
